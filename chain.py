@@ -18,7 +18,7 @@ import os
 import re
 from pathlib import Path
 from functools import lru_cache
-from typing import Dict, Iterable, Optional
+from typing import Dict, Iterable
 
 from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
@@ -68,18 +68,17 @@ def _get_logger() -> logging.Logger:
     return logger
 
 
-def _supabase_mcp_url() -> str:
+def _supabase_mcp_url(project_ref: str, features: str) -> str:
     """
     Monta a URL do servidor MCP do Supabase Cloud.
 
     read_only=true limita as ferramentas a operações seguras de leitura.
     features permite reduzir o conjunto de ferramentas expostas ao agente.
     """
-    project_ref = os.getenv("SUPABASE_PROJECT_REF", "").strip()
     if not project_ref:
         raise RuntimeError("SUPABASE_PROJECT_REF não definido")
 
-    features = os.getenv("SUPABASE_MCP_FEATURES", "database,docs").strip()
+    features = features.strip() or "database,docs"
 
     return (
         "https://mcp.supabase.com/mcp"
@@ -251,28 +250,28 @@ def _build_context_tools(tools: Iterable):
     ]
 
 
-def _build_headers() -> Dict[str, str]:
-    headers: Dict[str, str] = {}
-    token = os.getenv("SUPABASE_ACCESS_TOKEN", "").strip()
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    return headers
-
-
-async def _build_agent(api_key: str):
+async def _build_agent(
+    api_key: str,
+    project_ref: str,
+    supabase_token: str,
+    features: str,
+):
     """
     Cria o agente e carrega as tools do Supabase MCP.
     """
     if not api_key:
         raise ValueError("api_key vazia")
 
-    headers = _build_headers()
+    headers = {}
+    if supabase_token:
+        headers["Authorization"] = f"Bearer {supabase_token}"
+
     logger = _get_logger()
     client = MultiServerMCPClient(
         {
             "supabase": {
                 "transport": "http",
-                "url": _supabase_mcp_url(),
+                "url": _supabase_mcp_url(project_ref, features),
                 **({"headers": headers} if headers else {}),
             }
         }
@@ -281,7 +280,7 @@ async def _build_agent(api_key: str):
     base_tools = await client.get_tools()
     logger.info(
         "agent_build project_ref=%s headers=%s tools=%s",
-        os.getenv("SUPABASE_PROJECT_REF", "").strip() or "missing",
+        project_ref or "missing",
         "present" if headers else "absent",
         [t.name for t in base_tools],
     )
@@ -298,10 +297,37 @@ async def _build_agent(api_key: str):
 
 
 @lru_cache(maxsize=4)
-def get_chain(api_key: str):
+def _get_chain_cached(
+    api_key: str,
+    project_ref: str,
+    supabase_token: str,
+    features: str,
+):
+    return asyncio.run(
+        _build_agent(api_key, project_ref, supabase_token, features)
+    )
+
+
+def get_chain(
+    api_key: str,
+    project_ref: str | None = None,
+    supabase_token: str | None = None,
+    features: str | None = None,
+):
     """
     Retorna o agente pronto para uso no Streamlit.
 
-    Faz cache por api_key para evitar recarregar tools em toda mensagem.
+    Cacheia por combinação de credenciais para evitar recarregar tools.
     """
-    return asyncio.run(_build_agent(api_key))
+    resolved_project = (project_ref or os.getenv("SUPABASE_PROJECT_REF", "")).strip()
+    resolved_token = (supabase_token or os.getenv("SUPABASE_ACCESS_TOKEN", "")).strip()
+    resolved_features = (
+        features or os.getenv("SUPABASE_MCP_FEATURES", "database,docs")
+    ).strip()
+
+    return _get_chain_cached(
+        api_key or "",
+        resolved_project,
+        resolved_token,
+        resolved_features,
+    )

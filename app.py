@@ -79,11 +79,31 @@ with st.sidebar:
     default_key = os.getenv("OPENAI_API_KEY", "")
     api_key = st.text_input("OpenAI API Key", type="password", value=default_key)
 
-    project_ref = os.getenv("SUPABASE_PROJECT_REF", "")
-    st.caption(f"SUPABASE_PROJECT_REF carregado: {'sim' if bool(project_ref) else 'não'}")
+    default_project_ref = os.getenv("SUPABASE_PROJECT_REF", "")
+    default_supabase_token = os.getenv("SUPABASE_ACCESS_TOKEN", "")
+    default_features = os.getenv("SUPABASE_MCP_FEATURES", "database,docs")
+
+    project_ref = st.text_input(
+        "SUPABASE Project Ref",
+        value=default_project_ref,
+        help="Ref do projeto Supabase usado pelo MCP.",
+    )
+    supabase_token = st.text_input(
+        "SUPABASE Access Token",
+        type="password",
+        value=default_supabase_token,
+        help="Token Bearer para acessar o MCP (somente leitura).",
+    )
+    supabase_features = st.text_input(
+        "Supabase MCP features",
+        value=default_features,
+        help="Lista de features na URL do MCP (ex.: database,docs).",
+    )
 
     if not api_key:
         st.warning("Por favor, insira sua OpenAI API Key para continuar.")
+    if not project_ref:
+        st.warning("Informe o SUPABASE Project Ref para inicializar o MCP.")
 
 
 if "messages" not in st.session_state:
@@ -104,12 +124,25 @@ if prompt := st.chat_input("Diga algo..."):
     if not api_key:
         st.error("API Key não configurada.")
         st.stop()
+    if not project_ref:
+        st.error("SUPABASE_PROJECT_REF não configurado.")
+        st.stop()
     else:
         logger.info("chat.prompt text_len=%s", len(prompt))
 
     try:
-        agent = get_chain(api_key)
-        logger.info("agent.initialized")
+        agent = get_chain(
+            api_key,
+            project_ref=project_ref,
+            supabase_token=supabase_token,
+            features=supabase_features,
+        )
+        logger.info(
+            "agent.initialized project_ref=%s features=%s headers=%s",
+            project_ref or "missing",
+            supabase_features or "missing",
+            "present" if supabase_token else "absent",
+        )
     except Exception as e:
         logger.exception("agent.init.error")
         st.error(f"Falha ao inicializar o agente: {e}")
