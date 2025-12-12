@@ -13,8 +13,10 @@ Guarde SUPABASE_ACCESS_TOKEN no servidor. Não exponha em navegador.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
+from pathlib import Path
 from functools import lru_cache
 from typing import Dict, Iterable, Optional
 
@@ -46,6 +48,24 @@ Quando gerar SQL, explique quais tabelas/colunas usou e por quê.
 Resumo rápido do schema (schema.sql):
 {SYSTEM_SCHEMA_SUMMARY}
 """.strip()
+
+
+def _get_logger() -> logging.Logger:
+    logger = logging.getLogger("ntt_agent")
+    if logger.handlers:
+        return logger
+
+    logger.setLevel(logging.INFO)
+    log_path = Path(os.getenv("AGENT_LOG_FILE", "agent.log"))
+    if not log_path.is_absolute():
+        log_path = Path.cwd() / log_path
+    handler = logging.FileHandler(log_path, encoding="utf-8")
+    formatter = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s - %(message)s"
+    )
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    return logger
 
 
 def _supabase_mcp_url() -> str:
@@ -113,6 +133,7 @@ class ListTablesInput(BaseModel):
 
 def _build_context_tools(tools: Iterable):
     """Cria as tools de contexto (schema, amostras, FKs) a partir das MCP tools base."""
+    logger = _get_logger()
     list_tables_tool = _require_tool(tools, "list_tables")
     execute_sql_tool = _require_tool(tools, "execute_sql")
 
@@ -120,11 +141,17 @@ def _build_context_tools(tools: Iterable):
         payload = {}
         if schemas:
             payload["schemas"] = schemas
+        logger.info("tool=context_list_tables schemas=%s", schemas or ["public"])
         return await list_tables_tool.ainvoke(payload)
 
     async def describe_table(table: str, table_schema: str = "public"):
         _safe_ident(table)
         _safe_ident(table_schema)
+        logger.info(
+            "tool=context_describe_table table=%s schema=%s",
+            table,
+            table_schema,
+        )
         sql = f"""
         select
             column_name,
@@ -142,12 +169,23 @@ def _build_context_tools(tools: Iterable):
         _safe_ident(table)
         _safe_ident(table_schema)
         limit = max(1, min(limit, 50))
+        logger.info(
+            "tool=context_sample_rows table=%s schema=%s limit=%s",
+            table,
+            table_schema,
+            limit,
+        )
         sql = f"select * from {table_schema}.{table} limit {limit};"
         return await execute_sql_tool.ainvoke({"query": sql})
 
     async def foreign_keys(table: str, table_schema: str = "public"):
         _safe_ident(table)
         _safe_ident(table_schema)
+        logger.info(
+            "tool=context_foreign_keys table=%s schema=%s",
+            table,
+            table_schema,
+        )
         sql = f"""
         select
             tc.constraint_name,
@@ -169,6 +207,7 @@ def _build_context_tools(tools: Iterable):
         return await execute_sql_tool.ainvoke({"query": sql})
 
     async def table_row_counts():
+        logger.info("tool=context_table_row_counts")
         sql = """
         select
             schemaname as schema,
@@ -228,6 +267,7 @@ async def _build_agent(api_key: str):
         raise ValueError("api_key vazia")
 
     headers = _build_headers()
+    logger = _get_logger()
     client = MultiServerMCPClient(
         {
             "supabase": {
@@ -239,6 +279,12 @@ async def _build_agent(api_key: str):
     )
 
     base_tools = await client.get_tools()
+    logger.info(
+        "agent_build project_ref=%s headers=%s tools=%s",
+        os.getenv("SUPABASE_PROJECT_REF", "").strip() or "missing",
+        "present" if headers else "absent",
+        [t.name for t in base_tools],
+    )
     context_tools = _build_context_tools(base_tools)
 
     model = ChatOpenAI(

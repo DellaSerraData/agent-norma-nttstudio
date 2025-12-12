@@ -10,7 +10,10 @@ Na hora de chamar o agente, convertemos para objetos de mensagem do LangChain.
 """
 
 import asyncio
+import logging
 import os
+from pathlib import Path
+
 import streamlit as st
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -44,7 +47,28 @@ async def ainvoke_agent(agent, messages):
     return await agent.ainvoke({"messages": messages})
 
 
+def _setup_logger() -> logging.Logger:
+    logger = logging.getLogger("ntt_agent")
+    if logger.handlers:
+        return logger
+
+    logger.setLevel(logging.INFO)
+    log_path = Path(os.getenv("AGENT_LOG_FILE", "agent.log"))
+    if not log_path.is_absolute():
+        log_path = Path.cwd() / log_path
+
+    handler = logging.FileHandler(log_path, encoding="utf-8")
+    formatter = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s - %(message)s"
+    )
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+    return logger
+
+
 load_dotenv()
+logger = _setup_logger()
 
 st.set_page_config(page_title="NTT Agents", page_icon="💬")
 st.title("NTT Agents")
@@ -80,10 +104,14 @@ if prompt := st.chat_input("Diga algo..."):
     if not api_key:
         st.error("API Key não configurada.")
         st.stop()
+    else:
+        logger.info("chat.prompt text_len=%s", len(prompt))
 
     try:
         agent = get_chain(api_key)
+        logger.info("agent.initialized")
     except Exception as e:
+        logger.exception("agent.init.error")
         st.error(f"Falha ao inicializar o agente: {e}")
         st.stop()
 
@@ -100,8 +128,10 @@ if prompt := st.chat_input("Diga algo..."):
                 response = str(result)
 
             st.markdown(response)
+            logger.info("chat.response text_len=%s", len(response))
 
         st.session_state.messages.append({"role": "assistant", "content": response})
 
     except Exception as e:
+        logger.exception("agent.invoke.error")
         st.error(f"Erro ao executar o agente: {e}")
