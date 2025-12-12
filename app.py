@@ -1,44 +1,107 @@
+"""
+app.py
+
+Interface Streamlit para conversar com um agente LangChain que possui acesso ao Supabase via MCP.
+
+O histórico do chat fica em st.session_state.messages no formato:
+{ "role": "user" | "assistant", "content": "texto" }
+
+Na hora de chamar o agente, convertemos para objetos de mensagem do LangChain.
+"""
+
+import asyncio
 import os
 import streamlit as st
 from dotenv import load_dotenv
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
 from chain import get_chain
+
+
+def to_langchain_messages(history):
+    """
+    Converte o histórico do Streamlit para mensagens do LangChain.
+
+    Isso melhora compatibilidade com agentes e evita ambiguidades de formato.
+    """
+    out = []
+    for item in history:
+        role = item.get("role")
+        content = item.get("content", "")
+        if role == "user":
+            out.append(HumanMessage(content=content))
+        elif role == "assistant":
+            out.append(AIMessage(content=content))
+        elif role == "system":
+            out.append(SystemMessage(content=content))
+    return out
+
+
+async def ainvoke_agent(agent, messages):
+    """
+    Invoca o agente de forma assíncrona para permitir o uso de tools assíncronas (ex.: MCP).
+    """
+    return await agent.ainvoke({"messages": messages})
+
 
 load_dotenv()
 
-st.set_page_config(page_title="NTT Agents", page_icon=":speech_balloon:")
-
+st.set_page_config(page_title="NTT Agents", page_icon="💬")
 st.title("NTT Agents")
 
 with st.sidebar:
     st.header("Configurações")
+
     default_key = os.getenv("OPENAI_API_KEY", "")
     api_key = st.text_input("OpenAI API Key", type="password", value=default_key)
+
+    project_ref = os.getenv("SUPABASE_PROJECT_REF", "")
+    st.caption(f"SUPABASE_PROJECT_REF carregado: {'sim' if bool(project_ref) else 'não'}")
+
     if not api_key:
         st.warning("Por favor, insira sua OpenAI API Key para continuar.")
 
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
+
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
+
 if prompt := st.chat_input("Diga algo..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
+
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    if api_key:
-        chain = get_chain(api_key)
-        if chain:
-            try:
-                with st.chat_message("assistant"):
-                    response = chain.invoke({"topic": prompt})
-                    st.markdown(response)
-                st.session_state.messages.append({"role": "assistant", "content": response})
-            except Exception as e:
-                st.error(f"Erro ao executar a chain: {e}")
-        else:
-            st.error("Não foi possível inicializar a chain.")
-    else:
+    if not api_key:
         st.error("API Key não configurada.")
+        st.stop()
+
+    try:
+        agent = get_chain(api_key)
+    except Exception as e:
+        st.error(f"Falha ao inicializar o agente: {e}")
+        st.stop()
+
+    try:
+        lc_messages = to_langchain_messages(st.session_state.messages)
+
+        with st.chat_message("assistant"):
+            result = asyncio.run(ainvoke_agent(agent, lc_messages))
+
+            messages = result.get("messages", [])
+            if messages:
+                response = getattr(messages[-1], "content", str(messages[-1]))
+            else:
+                response = str(result)
+
+            st.markdown(response)
+
+        st.session_state.messages.append({"role": "assistant", "content": response})
+
+    except Exception as e:
+        st.error(f"Erro ao executar o agente: {e}")
